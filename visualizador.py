@@ -26,11 +26,13 @@ import json
 import os
 import struct
 import sys
+import time
 
 import vtk
 
 from dropdown import MenuVisualizacao
 from painel import PainelDeControle
+from nucleo import MonitorDoNucleo
 
 # ----------------------------------------------------------------------------
 # Configuracoes gerais
@@ -48,6 +50,58 @@ ANGULO_INICIAL = 25.0                # giro inicial da camera, em graus
 ELEVACAO_CAMERA = 10.0               # olhar um pouco de cima (graus)
 ZOOM = 1.1                           # >1 aproxima, <1 afasta
 MOSTRAR_INSTRUCOES = False           # texto de ajuda (o painel ocupa esse espaco)
+
+# ----------------------------------------------------------------------------
+# Barras de controle, no esquema de um PWR Westinghouse
+#
+# As barras (RCCAs) sao divididas em BANCOS. Cada banco tem barras espalhadas
+# de forma simetrica pelos quatro quadrantes do nucleo, para que mover um banco
+# absorva neutrons por igual em todo o reator (quem mede o equilibrio entre
+# quadrantes, o QPTR, sao os detectores de fora do vaso).
+#
+# O painel funciona como a chave seletora na posicao de banco individual:
+# cada linha move um banco com o seu IN-HOLD-OUT. Segurou, anda; soltou, para.
+# ----------------------------------------------------------------------------
+# Cada banco pega as barras de certos "aneis" da grade. O anel e o par
+# (menor, maior) da distancia ate o centro, em passos da grade:
+#     (0,0) centro   (0,1) cruz interna   (1,1) diagonais
+#     (0,2) cruz externa   (1,2) as oito posicoes restantes da borda
+# Assim todo banco tem simetria de 90 graus (e de 1/8 do nucleo).
+BANCOS = [
+    # linha, sigla, tipo,          aneis da grade
+    (1, "SA", "desligamento", [(1, 2)]),          # 8 barras
+    (2, "SB", "desligamento", [(0, 2)]),          # 4 barras
+    (3, "CA", "controle",     [(1, 1)]),          # 4 barras
+    (4, "CB", "controle",     [(0, 0), (0, 1)]),  # 5 barras (inclui a central)
+]
+PREFIXO_DAS_BARRAS = "support"       # barras = Supports que passam da Top Platform
+NOME_TOPO_DO_REATOR = "top platform"
+
+# Posicao contada em passos, como nos contadores de passos da sala de controle:
+# 0 = toda inserida, PASSOS_TOTAIS = toda retirada.
+PASSOS_TOTAIS = 231
+PASSOS_POR_MINUTO = {"desligamento": 64, "controle": 48}
+ACELERACAO_DO_TEMPO = 1.0            # 1 = tempo real; 5 = cinco vezes mais rapido
+COMECAR_INSERIDAS = True             # reator desligado: tudo no fundo
+
+# Procedimento de partida: os bancos de controle so saem depois que TODOS os de
+# desligamento estiverem totalmente retirados. Inserir e sempre permitido.
+EXIGIR_SEQUENCIA = True
+
+# Trip (tecla T): as garras soltam e as barras caem por gravidade. Elas entram
+# no amortecedor (dashpot) perto do fundo e terminam a descida devagar.
+TEMPO_ATE_O_DASHPOT = 2.4            # segundos, partindo de toda retirada
+FRACAO_DO_DASHPOT = 0.10             # trecho final do curso freado pelo dashpot
+TEMPO_NO_DASHPOT = 0.6               # segundos para vencer esse trecho final
+
+# Ate onde a barra entra:
+#   "fuel rods"      -> fundo da barra rente ao fundo das Wire Things (fuel rods)
+#   "base interna"   -> fundo da barra encostado no topo da Internal Platform Bottom
+FIM_DA_INSERCAO = "fuel rods"
+PREFIXO_FUEL_RODS = "wire things"
+NOME_BASE_INTERNA = "internal platform bottom"
+DIRECAO_DA_PECA = (0.0, 1.0, 0.0)    # "para cima" no mundo (sentido de retirar)
+INTERVALO_DA_BARRA = 16              # milissegundos entre quadros do movimento
 
 # ----------------------------------------------------------------------------
 # Localizar o arquivo do modelo
@@ -293,6 +347,15 @@ def criar_fundo(janela: vtk.vtkRenderWindow) -> vtk.vtkRenderer:
             "R: voltar ao início\n"
             "V: abrir o menu de partes\n"
             "S: ligar o slider de corte\n"
+            "T: trip (barras caem)\n"
+            "B: rearmar depois do trip\n"
+            "A: retirar SA e SB de uma vez (teste)\n"
+            "I: reiniciar o reator\n"
+            "J / K: diluir / borar\n"
+            "X: acelerar a física\n"
+            "1-4: escolher quadrante\n"
+            "D: derrubar/realinhar barra\n"
+            ", e .: perna fria do laço\n"
             "Q: sair"
         )
         propriedade = texto.GetTextProperty()
@@ -331,6 +394,7 @@ class NavegacaoLivre(vtk.vtkInteractorStyleTrackballCamera):
         self.janela = janela
         self.menu = menu
         self.painel = painel
+        self.barras = None                # ControleDeBarras, ligado depois
 
         self.SetMotionFactor(SENSIBILIDADE)
         self.SetMouseWheelMotionFactor(ZOOM_RODA)
@@ -373,10 +437,14 @@ class NavegacaoLivre(vtk.vtkInteractorStyleTrackballCamera):
         if self.menu is not None and self.menu.clique(x, y):
             return  # o clique era do menu: a camera nao se mexe
         if self.painel is not None and self.painel.clique(x, y):
-            return  # apertou um botao do painel
+            return  # segurou um botao do painel
         self.OnLeftButtonDown()  # comportamento normal de girar
 
     def _moveu_mouse(self, obj, evento) -> None:
+        if self.painel is not None and self.painel.pressionando():
+            x, y = self.GetInteractor().GetEventPosition()
+            self.painel.mover_mouse(x, y)  # saiu de cima do botao = soltou
+            return
         if self.menu is not None and self.menu.arrastando():
             x, y = self.GetInteractor().GetEventPosition()
             self.menu.arrastar(x, y)
@@ -384,6 +452,8 @@ class NavegacaoLivre(vtk.vtkInteractorStyleTrackballCamera):
         self.OnMouseMove()
 
     def _soltou_esquerdo(self, obj, evento) -> None:
+        if self.painel is not None and self.painel.soltar():
+            return  # soltou o botao do painel: a barra para
         if self.menu is not None and self.menu.arrastando():
             self.menu.soltar()
             return
@@ -413,8 +483,376 @@ class NavegacaoLivre(vtk.vtkInteractorStyleTrackballCamera):
             self.menu.alternar_menu()
         elif tecla == "s" and self.menu is not None:
             self.menu.alternar_regua()
+        elif tecla == "t" and self.barras is not None:
+            self.barras.trip()
+        elif tecla == "b" and self.barras is not None:
+            self.barras.rearmar()
+        elif tecla == "a" and self.barras is not None:
+            self.barras.retirar_desligamento()
         elif tecla in ("q", "e", "escape"):
             self.GetInteractor().TerminateApp()
+
+
+# ----------------------------------------------------------------------------
+# Barras de controle
+# ----------------------------------------------------------------------------
+class BancoDeBarras:
+    """Um banco de barras: todas sobem e descem juntas, passo a passo.
+
+    `passos` segue a convencao dos contadores de passos: 0 e toda inserida e
+    PASSOS_TOTAIS e toda retirada. O modelo abre com as barras retiradas, entao
+    na posicao PASSOS_TOTAIS o deslocamento e zero e em 0 ele e `curso` para
+    baixo. O curso e medido do proprio modelo (ver _medir_curso).
+
+    O ator importado do glTF ja vem com escala embutida na matriz dele, entao
+    SetPosition nao anda em unidades do mundo. Por isso eu guardo a parte
+    linear da matriz original de cada ator, inverto, e converto o deslocamento
+    desejado para o referencial dele antes de aplicar.
+    """
+
+    def __init__(self, linha: int, sigla: str, tipo: str, atores: list,
+                 curso: float) -> None:
+        self.linha = linha
+        self.sigla = sigla
+        self.tipo = tipo
+        self.atores = atores
+        self.curso = max(0.0, curso)
+        self.passos = 0.0 if COMECAR_INSERIDAS else float(PASSOS_TOTAIS)
+        self.sentido = 0                  # +1 retirando, -1 inserindo, 0 parado
+        self.acumulado = 0.0              # fracao de passo ja "esperada"
+        self.travado = False              # OUT recusado pelo procedimento/trip
+        self.velocidade_de_queda = 0.0    # passos por segundo, durante o trip
+
+        self.para_o_ator = []
+        for ator in atores:
+            matriz = vtk.vtkMatrix4x4()
+            matriz.DeepCopy(ator.GetMatrix())
+            for eixo in range(3):
+                matriz.SetElement(eixo, 3, 0.0)  # so a parte linear interessa
+            matriz.Invert()
+            self.para_o_ator.append(matriz)
+        self.aplicar()
+
+    @property
+    def inserida(self) -> bool:
+        return self.passos <= 0.0
+
+    @property
+    def retirada(self) -> bool:
+        return self.passos >= PASSOS_TOTAIS
+
+    def andar(self, segundos: float) -> None:
+        """Da os passos que couberem no tempo, na velocidade do tipo do banco."""
+        if self.sentido == 0:
+            return
+        taxa = PASSOS_POR_MINUTO[self.tipo] / 60.0 * ACELERACAO_DO_TEMPO
+        self.acumulado += taxa * segundos
+        while self.acumulado >= 1.0 and self.sentido != 0:
+            self.acumulado -= 1.0
+            self.passos = min(PASSOS_TOTAIS, max(0, round(self.passos) + self.sentido))
+            if (self.sentido > 0 and self.retirada) or (self.sentido < 0 and self.inserida):
+                self.sentido = 0
+        self.aplicar()
+
+    def cair(self, segundos: float) -> None:
+        """Queda livre ate o dashpot, depois descida freada ate o fundo."""
+        if self.inserida:
+            self.velocidade_de_queda = 0.0
+            return
+        inicio_do_dashpot = FRACAO_DO_DASHPOT * PASSOS_TOTAIS
+        if self.passos > inicio_do_dashpot:
+            percurso = PASSOS_TOTAIS - inicio_do_dashpot
+            aceleracao = 2.0 * percurso / TEMPO_ATE_O_DASHPOT ** 2
+            self.velocidade_de_queda += aceleracao * segundos
+        else:
+            self.velocidade_de_queda = inicio_do_dashpot / TEMPO_NO_DASHPOT
+        self.passos = max(0.0, self.passos - self.velocidade_de_queda * segundos)
+        self.aplicar()
+
+    def aplicar(self) -> None:
+        # Retirada total = posicao do modelo; cada passo a menos desce a barra.
+        descida = self.curso * (1.0 - self.passos / PASSOS_TOTAIS)
+        deslocamento = [-c * descida for c in DIRECAO_DA_PECA] + [0.0]
+        for ator, matriz in zip(self.atores, self.para_o_ator):
+            x, y, z, _ = matriz.MultiplyPoint(deslocamento)
+            ator.SetPosition(x, y, z)
+
+
+def _altura(limites: tuple, topo: bool) -> float:
+    """Altura (ao longo de DIRECAO_DA_PECA) do topo ou do fundo de uma caixa."""
+    cantos = [
+        (limites[i & 1], limites[2 + ((i >> 1) & 1)], limites[4 + ((i >> 2) & 1)])
+        for i in range(8)
+    ]
+    alturas = [sum(c * d for c, d in zip(canto, DIRECAO_DA_PECA)) for canto in cantos]
+    return max(alturas) if topo else min(alturas)
+
+
+def _se_sobrepoem(a: tuple, b: tuple) -> bool:
+    """As duas caixas se cruzam no plano horizontal (X e Z)?"""
+    return a[0] <= b[1] and b[0] <= a[1] and a[4] <= b[5] and b[4] <= a[5]
+
+
+def dividir_em_bancos(partes: list) -> dict:
+    """Distribui as barras do modelo pelos bancos de BANCOS.
+
+    Barra, aqui, e todo Support que sobe acima da Top Platform (os Supports
+    curtos, que ficam dentro do vaso, sao estrutura fixa). Cada barra vira um
+    par de coordenadas inteiras na grade do nucleo, e o anel dela decide o
+    banco. Devolve {sigla: [atores]}.
+    """
+    topo = None
+    for p in partes:
+        if p["nome"].strip().lower() == NOME_TOPO_DO_REATOR:
+            topo = _altura(p["ator"].GetBounds(), topo=True)
+    barras = []
+    for p in partes:
+        if not p["nome"].strip().lower().startswith(PREFIXO_DAS_BARRAS):
+            continue
+        limites = p["ator"].GetBounds()
+        if topo is None or _altura(limites, topo=True) > topo:
+            centro = ((limites[0] + limites[1]) / 2.0, (limites[4] + limites[5]) / 2.0)
+            barras.append((p["ator"], centro))
+    if not barras:
+        return {}
+
+    xs = [c[0] for _, c in barras]
+    zs = [c[1] for _, c in barras]
+    cx, cz = (min(xs) + max(xs)) / 2.0, (min(zs) + max(zs)) / 2.0
+    # Passo da grade = menor distancia entre duas barras vizinhas.
+    distancias = [
+        max(abs(a[0] - b[0]), abs(a[1] - b[1]))
+        for i, (_, a) in enumerate(barras) for _, b in barras[i + 1:]
+    ]
+    passo = min((d for d in distancias if d > 1e-6), default=1.0)
+
+    anel_do_banco = {}
+    for _, sigla, _, aneis in BANCOS:
+        for anel in aneis:
+            anel_do_banco[tuple(anel)] = sigla
+
+    bancos = {sigla: [] for _, sigla, _, _ in BANCOS}
+    sem_banco = 0
+    for ator, (x, z) in barras:
+        i, j = abs(round((x - cx) / passo)), abs(round((z - cz) / passo))
+        sigla = anel_do_banco.get((min(i, j), max(i, j)))
+        if sigla is None:
+            sem_banco += 1
+        else:
+            bancos[sigla].append(ator)
+    if sem_banco:
+        print(f"Aviso: {sem_banco} barra(s) fora de qualquer banco ficam paradas.")
+    return bancos
+
+
+def _medir_curso(atores: list, partes: list) -> float:
+    """Distancia que a barra desce ate ficar toda inserida.
+
+    Com "fuel rods", usa o fundo das Wire Things que ficam na mesma coluna da
+    barra (se nao achar nenhuma na coluna, usa a mais baixa de todas). Com
+    "base interna", usa o topo da Internal Platform Bottom.
+    """
+    fundo_da_barra = min(_altura(a.GetBounds(), topo=False) for a in atores)
+    caixa_da_barra = [float("inf"), float("-inf")] * 3
+    for ator in atores:
+        limites = ator.GetBounds()
+        for e in range(3):
+            caixa_da_barra[2 * e] = min(caixa_da_barra[2 * e], limites[2 * e])
+            caixa_da_barra[2 * e + 1] = max(caixa_da_barra[2 * e + 1], limites[2 * e + 1])
+
+    alvo = None
+    if FIM_DA_INSERCAO.lower().startswith("fuel"):
+        fuel = [p["ator"].GetBounds() for p in partes
+                if p["nome"].strip().lower().startswith(PREFIXO_FUEL_RODS)]
+        na_coluna = [f for f in fuel if _se_sobrepoem(f, caixa_da_barra)]
+        escolhidas = na_coluna or fuel
+        if escolhidas:
+            alvo = min(_altura(f, topo=False) for f in escolhidas)
+    if alvo is None:
+        for p in partes:
+            if p["nome"].strip().lower() == NOME_BASE_INTERNA:
+                alvo = _altura(p["ator"].GetBounds(), topo=True)
+    if alvo is None:
+        print("Aviso: nao achei o referencial de insercao; a barra nao vai descer.")
+        return 0.0
+    return max(0.0, fundo_da_barra - alvo)
+
+
+class ControleDeBarras:
+    """Sistema de controle das barras: botoes, travas, trip, LEDs e contadores.
+
+    - Segurar IN: o banco da linha desce passo a passo. OUT: sobe. Soltou, para.
+    - Bancos de desligamento andam a 64 passos/min; os de controle, a 48.
+    - Com EXIGIR_SEQUENCIA, os bancos de controle so saem com os de
+      desligamento todos retirados. Inserir nunca e bloqueado.
+    - Tecla T: trip. Todas as barras caem por gravidade e a retirada fica
+      bloqueada ate rearmar os disjuntores com a tecla B.
+    - LED verde: banco todo inserido. Vermelho: todo retirado.
+    - Display: sigla do banco e o contador de passos (000 a PASSOS_TOTAIS).
+    """
+
+    def __init__(self, partes: list, painel: PainelDeControle,
+                 janela: vtk.vtkRenderWindow) -> None:
+        self.painel = painel
+        self.janela = janela
+        self.interator = None
+        self.id_temporizador = None
+        self.instante_anterior = 0.0
+        self.em_trip = False
+
+        atores_por_banco = dividir_em_bancos(partes)
+        self.bancos = []
+        self.banco_da_linha = {}
+        for linha, sigla, tipo, _ in BANCOS:
+            atores = atores_por_banco.get(sigla, [])
+            if not atores or not 1 <= linha <= len(painel.linhas):
+                continue
+            banco = BancoDeBarras(linha, sigla, tipo, atores,
+                                  _medir_curso(atores, partes))
+            self.bancos.append(banco)
+            self.banco_da_linha[linha] = banco
+
+        painel.ao_pressionar = self.pressionar
+        painel.ao_soltar = self.soltar
+        self.atualizar_indicadores(renderizar=False)
+
+    def conectar(self, interator: vtk.vtkRenderWindowInteractor) -> None:
+        self.interator = interator
+        interator.AddObserver("TimerEvent", self._ao_temporizador)
+
+    # -- regras --------------------------------------------------------------
+    def _pode_retirar(self, banco: BancoDeBarras) -> bool:
+        if self.em_trip:
+            return False
+        if EXIGIR_SEQUENCIA and banco.tipo == "controle":
+            return all(b.retirada for b in self.bancos if b.tipo == "desligamento")
+        return True
+
+    # -- botoes --------------------------------------------------------------
+    def pressionar(self, numero: int, tipo: str) -> None:
+        banco = self.banco_da_linha.get(numero)
+        if banco is None or self.em_trip:
+            if banco is not None and tipo == "out":
+                banco.travado = True
+                self.atualizar_indicadores()
+            return
+        if tipo == "out" and not self._pode_retirar(banco):
+            banco.travado = True
+            self.atualizar_indicadores()
+            return
+        banco.sentido = 1 if tipo == "out" else -1
+        if (banco.sentido > 0 and banco.retirada) or (banco.sentido < 0 and banco.inserida):
+            banco.sentido = 0
+            return
+        # O primeiro passo sai logo que o botao e apertado, como no painel real.
+        banco.acumulado = 1.0
+        banco.andar(0.0)
+        self.atualizar_indicadores()
+        self._iniciar()
+
+    def soltar(self, numero: int, tipo: str) -> None:
+        banco = self.banco_da_linha.get(numero)
+        if banco is not None:
+            banco.sentido = 0
+            banco.acumulado = 0.0
+            if banco.travado:
+                banco.travado = False
+                self.atualizar_indicadores()
+
+    # -- trip ----------------------------------------------------------------
+    def trip(self) -> None:
+        """Abre os disjuntores de trip: as garras soltam e tudo cai."""
+        if self.em_trip:
+            return
+        self.em_trip = True
+        for banco in self.bancos:
+            banco.sentido = 0
+            banco.velocidade_de_queda = 0.0
+        self.atualizar_indicadores()
+        self._iniciar()
+
+    def retirar_desligamento(self) -> None:
+        """Atalho de teste: poe os bancos de desligamento todos fora, na hora.
+
+        Na usina eles sobem passo a passo como os outros; aqui pulam direto
+        para PASSOS_TOTAIS para nao ter que segurar OUT por minutos. Com os
+        bancos de controle no fundo o reator continua subcritico.
+        """
+        if self.em_trip:
+            return
+        for banco in self.bancos:
+            if banco.tipo == "desligamento":
+                banco.sentido = 0
+                banco.acumulado = 0.0
+                banco.travado = False
+                banco.passos = float(PASSOS_TOTAIS)
+                banco.aplicar()
+        self.atualizar_indicadores()
+
+    def rearmar(self) -> None:
+        """Fecha os disjuntores de novo (so depois que tudo chegou no fundo)."""
+        if self.em_trip and all(b.inserida for b in self.bancos):
+            self.em_trip = False
+            self.atualizar_indicadores()
+
+    # -- relogio -------------------------------------------------------------
+    def _em_movimento(self) -> bool:
+        if self.em_trip and not all(b.inserida for b in self.bancos):
+            return True
+        return any(b.sentido for b in self.bancos)
+
+    def _iniciar(self) -> None:
+        if self.interator is None or self.id_temporizador is not None:
+            return
+        self.instante_anterior = time.monotonic()
+        self.id_temporizador = self.interator.CreateRepeatingTimer(INTERVALO_DA_BARRA)
+
+    def _parar(self) -> None:
+        if self.id_temporizador is not None and self.interator is not None:
+            self.interator.DestroyTimer(self.id_temporizador)
+        self.id_temporizador = None
+
+    def _ao_temporizador(self, obj, evento) -> None:
+        if self.id_temporizador is None:
+            return
+        # O quanto anda depende do tempo real que passou, e nao de quantos
+        # eventos chegaram (o menu tambem usa o relogio do interator).
+        agora = time.monotonic()
+        segundos = min(0.1, agora - self.instante_anterior)
+        self.instante_anterior = agora
+        self.avancar(segundos)
+        if not self._em_movimento():
+            self._parar()
+
+    def avancar(self, segundos: float) -> None:
+        antes = [b.passos for b in self.bancos]
+        for banco in self.bancos:
+            if self.em_trip:
+                banco.cair(segundos)
+            else:
+                banco.andar(segundos)
+        # So redesenha quando algum banco de fato deu passo (ou esta caindo).
+        if [b.passos for b in self.bancos] != antes:
+            self.atualizar_indicadores()
+
+    # -- LEDs e contadores ---------------------------------------------------
+    def atualizar_indicadores(self, renderizar: bool = True) -> None:
+        for banco in self.bancos:
+            self.painel.definir_leds(
+                banco.linha, banco.inserida, banco.retirada, renderizar=False
+            )
+            if self.em_trip:
+                aviso = "TRIP"
+            elif banco.travado:
+                aviso = "RETIRADA BLOQUEADA"
+            else:
+                aviso = ""
+            texto = f"{banco.sigla}   {int(round(banco.passos)):03d} passos"
+            self.painel.linhas[banco.linha - 1].texto_display.SetInput(
+                texto + ("\n" + aviso if aviso else "")
+            )
+        if renderizar:
+            self.janela.Render()
 
 
 # ----------------------------------------------------------------------------
@@ -448,10 +886,22 @@ def main() -> None:
 
     interator = vtk.vtkRenderWindowInteractor()
     interator.SetRenderWindow(janela)
-    interator.SetInteractorStyle(
-        NavegacaoLivre(renderizador, janela, menu, painel)
-    )
+    estilo = NavegacaoLivre(renderizador, janela, menu, painel)
+    interator.SetInteractorStyle(estilo)
     menu.conectar(interator)
+
+    # Cada linha do painel move um banco (IN insere, OUT retira).
+    # T = trip (todas as barras caem); B = rearmar depois do trip.
+    # A = atalho de teste: retira SA e SB de uma vez.
+    barras = ControleDeBarras(menu.partes, painel, janela)
+    barras.conectar(interator)
+    estilo.barras = barras
+
+    # Fisica do nucleo, so na regiao dos fuel rods (nucleo.py).
+    # J = diluir boro, K = borar, X = acelerar o tempo da fisica,
+    # 1-4 = quadrante, D = barra caida, , e . = perna fria do laco.
+    nucleo = MonitorDoNucleo(menu.partes, barras, painel, janela, renderizador)
+    nucleo.conectar(interator)
 
     interator.Initialize()
     janela.Render()
