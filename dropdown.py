@@ -21,6 +21,7 @@ Quem usa isso e o visualizador_3d.py, mais ou menos assim:
 from __future__ import annotations
 
 import math
+import time
 
 import vtk
 
@@ -418,6 +419,7 @@ class MenuVisualizacao:
         self.altura_painel = 0
         self.interator = None
         self.id_temporizador = None
+        self.instante_animacao = 0.0
 
         # Camada por cima da cena 3D: o VTK desenha as camadas em ordem.
         janela.SetNumberOfLayers(2)
@@ -613,6 +615,7 @@ class MenuVisualizacao:
             self.progresso = self.destino
             self._terminar_animacao()
             return
+        self.instante_animacao = time.monotonic()
         if self.id_temporizador is None:
             self.id_temporizador = self.interator.CreateRepeatingTimer(
                 INTERVALO_ANIMACAO
@@ -621,7 +624,11 @@ class MenuVisualizacao:
     def _ao_temporizador(self, obj, evento) -> None:
         if self.id_temporizador is None:
             return
-        passo = INTERVALO_ANIMACAO / max(1.0, DURACAO_ANIMACAO * 1000.0)
+        # O quanto anda depende do tempo que passou, e nao de quantos eventos
+        # chegaram: os timers das barras e da fisica tambem geram TimerEvent.
+        agora = time.monotonic()
+        passo = (agora - self.instante_animacao) / max(1e-3, DURACAO_ANIMACAO)
+        self.instante_animacao = agora
         if self.destino > self.progresso:
             self.progresso = min(self.destino, self.progresso + passo)
         else:
