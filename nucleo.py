@@ -38,24 +38,42 @@ Ao abrir, o reator ja comeca conforme MODO_INICIAL, com a fisica rodando:
                   sem xenonio. So a fonte de partida mantem alguns neutrons.
                   O usuario faz a partida retirando os bancos.
     "partida"   - comeca desligado e o programa faz a partida sozinho:
-                  retira SA e SB, depois CA e CB controlando a taxa de subida
+                  retira o banco L, depois D1, D2 e D3 em serie, controlando a
+                  taxa de subida
                   (SUR), ate POTENCIA_ALVO_DA_PARTIDA. Qualquer botao do painel
                   ou um trip devolve o controle ao usuario.
     "operando"  - critico a POTENCIA_INICIAL, com xenonio de equilibrio e o
                   boro ja ajustado (busca do boro critico).
 A tecla I reinicia a simulacao no MODO_INICIAL (tambem serve depois de um trip).
 
-O que da para fazer para ver os quadrantes se influenciando:
-    - teclas 1 a 4: escolhe o quadrante
-    - D: derruba (ou realinha) uma barra do banco CA naquele quadrante
-    - , e . : esfria / esquenta a perna fria do laco daquele quadrante
-      (como se o gerador de vapor daquele laco tirasse mais ou menos calor)
+Quadrantes: o mapa so mostra o estado de cada um (potencia, temperaturas,
+QPTR). Nao ha selecao nem comando por quadrante: cada um evolui sozinho, a
+partir da fisica do nucleo, e as barras agem nos quatro por igual.
 
 Dados de Angra 2 usados (FSAR, via Gonzalez-Mantecon et al., EPJ Nuclear
 Sci. Technol. 1, 5 (2015)): 3771,4 MWt; 193 elementos com 236 varetas;
-revestimento de Zircaloy-4 com 0,72 mm; 15,7 MPa; temperatura media de
-308,6 C com 34 C de elevacao no nucleo; vazao efetiva de 17 672 kg/s.
-Altura ativa de 3,9 m, como nas usinas KWU de 16x16.
+revestimento de Zircaloy-4 com 0,72 mm; 15,7 MPa na saida do vaso; agua a
+292,1 C na entrada e 326,1 C na saida do vaso (34 C de elevacao NO VASO);
+vazao total de 18 800 kg/s, dos quais 17 672 kg/s passam pelo combustivel
+(o resto e bypass); 20,7 kW/m de potencia linear media. Altura ativa de
+3,9 m e 61 barras de controle "pretas" (Ag-In-Cd), como nas usinas KWU
+pre-Konvoi/Konvoi.
+
+Como so a vazao efetiva passa pelo combustivel, a agua esquenta ~37 C dentro
+do nucleo (sai a ~328 C, o mesmo que o RELAP5-3D do artigo calcula) e cai
+para ~326 C ao se misturar com o bypass. A leitura "Saida" da tela e a do
+nucleo; "Saida vaso" ja inclui essa mistura.
+
+Barras no esquema KWU (o de Angra 2), e nao no da Westinghouse:
+    L  - banco L: a maior parte das barras. Fica fora em operacao normal e
+         so entra um pouco para corrigir a distribuicao axial de potencia.
+         E o que segura o reator desligado.
+    D1, D2, D3 - grupos D (4 barras cada), que controlam a potencia e
+         compensam o Doppler. Saem e entram em serie, sem sobreposicao; em
+         potencia so o ultimo (D3) fica parcialmente inserido.
+Cada coluna do modelo vale ~9 elementos reais, entao a barra de uma coluna
+do banco L representa ~5 barras reais e a de um grupo D, uma so. O peso de
+cada coluna (PESO_DAS_BARRAS) leva isso em conta no valor das barras.
 
 Os coeficientes de reatividade (Doppler, moderador, boro, xenonio), a mistura
 entre canais e a do pleno inferior sao valores tipicos de PWR, nao medidos
@@ -70,8 +88,7 @@ Dentro do visualizador (o visualizador.py ja faz isso):
     nucleo = MonitorDoNucleo(menu.partes, barras, painel, janela, renderizador)
     nucleo.conectar(interator)
 
-Teclas: J diluir boro, K borar, X acelerar a fisica, 1-4 quadrante,
-        D barra caida, , e . temperatura da perna fria, I reiniciar.
+Teclas: J diluir boro, K borar, X acelerar a fisica, I reiniciar.
 
 Sozinho, sem VTK, roda testes no terminal:
 
@@ -91,8 +108,9 @@ import numpy as np
 # Condicoes de contorno (o que esta fora da regiao dos fuel rods)
 # ----------------------------------------------------------------------------
 PRESSAO_MPA = 15.7                   # pressao do primario (pressurizador)
-T_ENTRADA = 291.6                    # perna fria, em C (308,6 - 34/2)
+T_ENTRADA = 292.1                    # perna fria / entrada do vaso, em C (FSAR)
 VAZAO_NUCLEO = 17672.0               # kg/s efetivos para troca de calor
+VAZAO_VASO = 18800.0                 # kg/s totais (4 x 4700); o resto e bypass
 POTENCIA_NOMINAL = 3771.4e6          # W termicos a 100 %
 FRACAO_NO_COMBUSTIVEL = 0.974        # o resto (gama, neutrons) aquece a agua direto
 
@@ -112,6 +130,19 @@ K_REVESTIMENTO = 17.0                # W/mK, Zircaloy-4
 RHO_CP_UO2 = 3.2e6                   # J/m3K, capacidade termica da pastilha
 
 NOS_AXIAIS = 10                      # fatias do combustivel na vertical
+
+# ----------------------------------------------------------------------------
+# Barras de controle (esquema KWU de Angra 2: 61 barras pretas Ag-In-Cd)
+#
+# Cada coluna do modelo vale ~9 elementos, e uma barra do modelo cobre a
+# coluna inteira. Na usina, cada grupo D tem so 4 barras (de 61), enquanto o
+# banco L tem quase todas as outras. Por isso a barra de cada banco recebe um
+# peso de absorcao, calculado ao criar o nucleo (calibrar_pesos): o banco L
+# tem peso 1, e o peso de cada grupo D e o que da a ele VALOR_DE_CADA_GRUPO_D
+# sozinho. O conjunto todo continua valendo VALOR_TOTAL_DAS_BARRAS.
+# ----------------------------------------------------------------------------
+VALOR_DE_CADA_GRUPO_D = 700.0        # pcm, grupo D sozinho todo dentro (tipico
+                                     # de 4 barras pretas de um nucleo KWU)
 
 # ----------------------------------------------------------------------------
 # Difusao de neutrons (um grupo, malha grossa)
@@ -158,7 +189,6 @@ VALOR_TOTAL_DAS_BARRAS = 8500.0      # pcm com todas as barras no fundo
 XENONIO_EQUILIBRIO = 2800.0          # pcm de Xe em equilibrio a 100 %
 TEMPO_DE_MISTURA_DO_BORO = 30.0      # s, para a concentracao chegar no alvo
 PASSO_DO_BORO = 10.0                 # ppm por toque em J ou K
-PASSO_DA_PERNA_FRIA = 1.0            # C por toque em , ou .
 
 # Xenonio e iodo
 LAMBDA_IODO = 2.87e-5                # 1/s
@@ -167,8 +197,12 @@ RENDIMENTO_IODO = 0.0639
 RENDIMENTO_XENONIO = 0.00237
 QUEIMA_DO_XENONIO = 7.5e-5           # sigma_a * fluxo a 100 %, em 1/s
 
-# Calor de decaimento: (fracao da potencia, constante de tempo em s)
-GRUPOS_DE_DECAIMENTO = ((0.020, 3.0), (0.020, 40.0), (0.015, 400.0), (0.010, 4000.0))
+# Calor de decaimento: (fracao da potencia, constante de tempo em s).
+# Ajustado a curva de Way-Wigner para 1 ano de operacao: fica dentro de ~10 %
+# de 1 s ate 1 dia depois do desligamento (6,0 % em 1 s, 2,3 % em 100 s,
+# 1,0 % em 1 h, 0,7 % em 4 h, 0,45 % em 1 dia).
+GRUPOS_DE_DECAIMENTO = ((0.028, 2.0), (0.018, 25.0), (0.009, 250.0),
+                        (0.008, 2500.0), (0.0015, 2.5e4), (0.0067, 2.5e5))
 
 # ----------------------------------------------------------------------------
 # Inicio da simulacao
@@ -176,7 +210,9 @@ GRUPOS_DE_DECAIMENTO = ((0.020, 3.0), (0.020, 40.0), (0.015, 400.0), (0.010, 400
 MODO_INICIAL = "desligado"           # "desligado", "partida" ou "operando"
 POTENCIA_INICIAL = 1.0               # modo "operando": fracao nominal
 XENONIO_DE_EQUILIBRIO = True         # modo "operando": Xe como apos dias a essa potencia
-POSICOES_DE_OPERACAO = {"SA": 231, "SB": 231, "CA": 231, "CB": 200}   # passos
+# Em potencia, como numa KWU: L todo fora, D1 e D2 fora, D3 (o grupo que
+# regula) um pouco dentro.
+POSICOES_DE_OPERACAO = {"L": 231, "D1": 231, "D2": 231, "D3": 200}   # passos
 POTENCIA_ALVO_DA_PARTIDA = 1.0       # modo "partida": onde o programa para
 SUR_MAXIMO_DA_PARTIDA = 1.0          # dpm; acima disso a partida espera
 
@@ -193,7 +229,6 @@ ACELERACOES = (1, 10, 60, 600)       # tecla X alterna entre essas
 INTERVALO_DA_FISICA = 100            # ms entre atualizacoes na tela
 ORCAMENTO_POR_QUADRO = 0.06          # s de CPU no maximo por atualizacao
 PREFIXO_FUEL_RODS = "wire things"
-BANCO_DA_BARRA_CAIDA = "CA"          # banco de onde sai a barra que cai (tecla D)
 DIRECAO_VERTICAL = (0.0, 1.0, 0.0)   # mesmo "para cima" do visualizador
 
 # Quadrantes vistos de cima: (sinal em x, sinal em z). Q1 em cima a direita.
@@ -279,6 +314,62 @@ def condutividade_uo2(temperatura_c):
     return 1.0 / (0.0375 + 2.165e-4 * T) + 4.715e9 / T ** 2 * np.exp(-16361.0 / T)
 
 
+_PESOS_CALCULADOS = {}
+
+
+def calibrar_pesos(posicoes: list, bancos_por_coluna: list, nos: int = NOS_AXIAIS) -> list:
+    """Peso de absorcao da barra de cada coluna, pela sigla do banco dela.
+
+    `bancos_por_coluna` tem, por coluna, a sigla do banco (ou None se a
+    coluna nao tem barra). Bancos cuja sigla comeca com "D" sao grupos D:
+    o peso deles e ajustado para cada um valer VALOR_DE_CADA_GRUPO_D sozinho.
+    Os outros (o banco L) ficam com peso 1. O resultado fica guardado, porque
+    o nucleo e recriado a cada reinicio.
+    """
+    chave = (tuple(map(tuple, posicoes)), tuple(bancos_por_coluna), nos)
+    if chave in _PESOS_CALCULADOS:
+        return list(_PESOS_CALCULADOS[chave])
+
+    C = len(posicoes)
+    grupos_d = sorted({s for s in bancos_por_coluna if s and s.upper().startswith("D")})
+    pesos = np.array([0.0 if s is None else (0.3 if s in grupos_d else 1.0)
+                      for s in bancos_por_coluna])
+    if not grupos_d:
+        _PESOS_CALCULADOS[chave] = list(pesos)
+        return list(pesos)
+
+    n = NucleoPWR(posicoes, [0.0] * C, nos, pesos=np.ones(C))
+    base = n.K0 * n.carregamento                      # sem boro, barras fora
+    k_alvo = 1.0 / (1.0 - RHO_EXCESSO * 1e-5)
+    k_dentro = 1.0 / (1.0 - (RHO_EXCESSO - VALOR_TOTAL_DAS_BARRAS) * 1e-5)
+    k_grupo = 1.0 / (1.0 - (RHO_EXCESSO - VALOR_DE_CADA_GRUPO_D) * 1e-5)
+
+    def bissecao(funcao, alvo, alto):
+        baixo = 0.0
+        for _ in range(30):
+            meio = 0.5 * (baixo + alto)
+            if funcao(meio) > alvo:
+                baixo = meio
+            else:
+                alto = meio
+        return 0.5 * (baixo + alto)
+
+    R = 0.1
+    for _ in range(6):
+        R = bissecao(lambda r: n._autovalor_exato(base * (1.0 - r * pesos[:, None])),
+                     k_dentro, 0.95)
+        for sigla in grupos_d:
+            mascara = np.array([s == sigla for s in bancos_por_coluna], dtype=float)
+
+            def k_do_grupo(w, mascara=mascara):
+                return n._autovalor_exato(base * (1.0 - R * w * mascara[:, None]))
+
+            w = bissecao(k_do_grupo, k_grupo, 1.0 / max(R, 1e-6))
+            pesos[mascara > 0] = w
+    _PESOS_CALCULADOS[chave] = list(pesos)
+    return list(pesos)
+
+
 def superaquecimento_jens_lottes(fluxo):
     """Quanto o revestimento fica acima da saturacao em ebulicao nucleada."""
     return 25.0 * (np.maximum(fluxo, 0.0) / 1e6) ** 0.25 * math.exp(-PRESSAO_MPA / 6.2)
@@ -293,12 +384,20 @@ class NucleoPWR:
     `posicoes` sao os centros de cada coluna de combustivel em passos da
     grade (0, 0 e o centro; +x a direita e -z para cima, vistos de cima).
     `insercoes` e, por coluna, a fracao da altura ativa ocupada pela barra,
-    contada de cima (0 = fora, 1 = no fundo).
+    contada de cima (0 = fora, 1 = no fundo). `bancos` e a sigla do banco da
+    barra de cada coluna (None se nao tem); com ele os pesos de absorcao sao
+    calibrados (calibrar_pesos). Tambem da para passar `pesos` direto; sem
+    nenhum dos dois, todas as barras valem igual.
     """
 
     def __init__(self, posicoes: list, insercoes: list | None = None,
-                 nos: int = NOS_AXIAIS) -> None:
+                 nos: int = NOS_AXIAIS, pesos: list | None = None,
+                 bancos: list | None = None) -> None:
         C, N = len(posicoes), nos
+        if pesos is None and bancos is not None:
+            pesos = calibrar_pesos(posicoes, bancos, nos)
+        self.peso_da_barra = (np.ones(C) if pesos is None
+                              else np.clip(np.array(pesos, dtype=float), 0.0, None))
         self.colunas, self.nos = C, N
         self.posicoes = np.array(posicoes, dtype=float)
         forma = (C, N)
@@ -409,7 +508,18 @@ class NucleoPWR:
         k_alvo = 1.0 / (1.0 - RHO_EXCESSO * 1e-5)
         k_dentro = 1.0 / (1.0 - (RHO_EXCESSO - VALOR_TOTAL_DAS_BARRAS) * 1e-5)
         self.K0 = k_alvo / k_ref
-        self.R = 1.0 - k_dentro / k_alvo         # todas dentro = k cai por igual
+        # R: absorcao de uma barra de peso 1 no fundo. Ajustado para que todas
+        # as barras dentro valham VALOR_TOTAL_DAS_BARRAS (bissecao).
+        base = self.K0 * self.carregamento
+        peso = self.peso_da_barra[:, None]
+        baixo, alto = 0.0, 0.95
+        for _ in range(40):
+            meio = 0.5 * (baixo + alto)
+            if self._autovalor_exato(base * (1.0 - meio * peso)) > k_dentro:
+                baixo = meio
+            else:
+                alto = meio
+        self.R = 0.5 * (baixo + alto)
 
         # -- estado inicial: subcritico com fonte ---------------------------
         self._reatividade(exato=True)
@@ -422,8 +532,14 @@ class NucleoPWR:
 
     # -- entradas --------------------------------------------------------------
     def definir_insercoes(self, insercoes) -> None:
-        self.insercao = np.clip(np.array(insercoes, dtype=float), 0.0, 1.0)
+        nova = np.clip(np.array(insercoes, dtype=float), 0.0, 1.0)
+        mudou = nova.shape != self.insercao.shape or not np.array_equal(nova, self.insercao)
+        self.insercao = nova
         self._cobertura()
+        if mudou and hasattr(self, "rho_total"):
+            # A reatividade ja vale no proximo passo (importa no trip com a
+            # fisica acelerada, quando o passo termico chega a 1 s).
+            self._reatividade()
 
     def mudar_boro(self, delta_ppm: float) -> None:
         self.boro_alvo = max(0.0, min(3000.0, self.boro_alvo + delta_ppm))
@@ -651,7 +767,8 @@ class NucleoPWR:
             "Xenônio": -XENONIO_EQUILIBRIO * self.xenonio / self.xenonio_100,
         }
         soma = sum(termos.values())
-        kinf = self.K0 * self.carregamento * (1.0 + 1e-5 * soma) * (1.0 - self.R * self.coberto)
+        kinf = self.K0 * self.carregamento * (1.0 + 1e-5 * soma) * (
+            1.0 - self.R * self.peso_da_barra[:, None] * self.coberto)
         if exato:
             self._autovalor_exato(kinf)
         else:
@@ -696,6 +813,10 @@ class NucleoPWR:
     def resumo(self) -> dict:
         q = self.q_linear
         q_medio = q.mean()
+        # Saida do vaso: agua do nucleo misturada com o bypass, que nao esquenta.
+        h_bypass = float(entalpia_da_agua(self.perna_fria).mean())
+        h_vaso = (VAZAO_NUCLEO * float(self.entalpia_saida.mean())
+                  + (VAZAO_VASO - VAZAO_NUCLEO) * h_bypass) / VAZAO_VASO
         return {
             "potencia": self.potencia_termica,
             "neutrons": self.n,
@@ -708,13 +829,17 @@ class NucleoPWR:
             "boro": self.boro, "boro_alvo": self.boro_alvo,
             "T_entrada": float(self.perna_fria.mean()),
             "T_saida": float(estado_da_agua(self.entalpia_saida.mean())[0]),
+            "T_saida_vaso": float(estado_da_agua(h_vaso)[0]),
             "T_media": float(self.T_agua.mean()),
             "densidade": float(self.densidade.mean()),
             "margem_saturacao": T_SATURACAO - max(float(self.T_agua.max()), float(self.T_saida.max())),
             "T_pastilha": float(self.T_pastilha.mean()),
             "T_centro_max": float(self.T_centro.max()),
             "T_revest_max": float(self.T_revestimento.max()),
-            "q_max": float(q.max()),
+            # q' gerado dentro da vareta (sem a parte gama/neutrons que
+            # aquece a agua direto), comparavel aos 20,7 kW/m do FSAR.
+            "q_max": float(q.max()) * FRACAO_NO_COMBUSTIVEL,
+            "q_medio": float(q_medio) * FRACAO_NO_COMBUSTIVEL,
             "pico": float(q.max() / q_medio) if q_medio > 1e-6 else 0.0,
             "ebulicao_nucleada": bool((self.T_revestimento >= T_SATURACAO - 1e-6).any())
                                  and self.potencia_termica > 1e-3,
@@ -797,8 +922,6 @@ class MonitorDoNucleo:
         self.velocidade_real = 1.0
         self.motivo_do_trip = ""
         self.tamanho_desenhado = (0, 0)
-        self.quadrante = 0                          # selecionado (0 = Q1)
-        self.caidas = set()                         # atores de barras caidas
 
         # -- regiao dos fuel rods -------------------------------------------
         self.combustivel = [
@@ -824,6 +947,7 @@ class MonitorDoNucleo:
 
         # -- cada barra do painel cai em uma coluna de combustivel ----------
         self.barras_da_coluna = [[] for _ in self.combustivel]
+        self.banco_da_coluna = [None] * len(self.combustivel)   # sigla, para os pesos
         self.coluna_da_barra = {}
         for banco in getattr(barras, "bancos", []):
             for ator in banco.atores:
@@ -832,11 +956,11 @@ class MonitorDoNucleo:
                     if _cruza_no_plano(caixa, c):
                         self.barras_da_coluna[j].append(ator)
                         self.coluna_da_barra[id(ator)] = j
+                        self.banco_da_coluna[j] = banco.sigla
                         break
 
         self.posicoes = posicoes
-        self.nucleo = NucleoPWR(posicoes, self.medir_insercoes())
-        self._preparar_barra_caida()
+        self.nucleo = NucleoPWR(posicoes, self.medir_insercoes(), bancos=self.banco_da_coluna)
 
         # Partida automatica: um botao do painel devolve o controle ao usuario.
         self.automatico = False
@@ -890,7 +1014,6 @@ class MonitorDoNucleo:
         """Comeca (ou recomeca) a simulacao: "operando", "partida" ou "desligado"."""
         barras = self.barras
         barras.em_trip = False
-        self.caidas.clear()
         self.motivo_do_trip = ""
         self.automatico = False
         self.situacao = ""
@@ -904,7 +1027,7 @@ class MonitorDoNucleo:
             self._posicionar_bancos({})           # tudo no fundo
         barras.atualizar_indicadores(renderizar=False)
 
-        self.nucleo = NucleoPWR(self.posicoes, self.medir_insercoes())
+        self.nucleo = NucleoPWR(self.posicoes, self.medir_insercoes(), bancos=self.banco_da_coluna)
         if modo == "operando":
             if not self.nucleo.equilibrar(POTENCIA_INICIAL, xenonio=XENONIO_DE_EQUILIBRIO):
                 self._avisar("sem boro crítico: ajuste as barras", 30.0)
@@ -1041,47 +1164,6 @@ class MonitorDoNucleo:
             renderizador_3d.AddActor(rotulo)
             self.rotulos_3d.append(rotulo)
 
-    # -- barra caida ----------------------------------------------------------
-    def _preparar_barra_caida(self) -> None:
-        """Escolhe uma barra por quadrante e ensina o banco a deixa-la no fundo."""
-        W = self.nucleo.pesos_quadrante
-        self.barra_do_quadrante = [None] * 4
-        bancos = list(getattr(self.barras, "bancos", []))
-        preferidos = [b for b in bancos if b.sigla == BANCO_DA_BARRA_CAIDA] + bancos
-        for q in range(4):
-            for banco in preferidos:
-                for ator in banco.atores:
-                    j = self.coluna_da_barra.get(id(ator))
-                    if j is not None and W[q, j] >= 0.999:
-                        self.barra_do_quadrante[q] = (banco, ator)
-                        break
-                if self.barra_do_quadrante[q]:
-                    break
-
-        for banco in bancos:
-            original = banco.aplicar
-
-            def aplicar(banco=banco, original=original):
-                original()
-                for i, ator in enumerate(banco.atores):
-                    if id(ator) in self.caidas:
-                        deslocamento = [-c * banco.curso for c in DIRECAO_VERTICAL] + [0.0]
-                        x, y, z, _ = banco.para_o_ator[i].MultiplyPoint(deslocamento)
-                        ator.SetPosition(x, y, z)
-
-            banco.aplicar = aplicar
-
-    def alternar_barra_caida(self) -> None:
-        escolha = self.barra_do_quadrante[self.quadrante]
-        if escolha is None:
-            return
-        banco, ator = escolha
-        if id(ator) in self.caidas:
-            self.caidas.discard(id(ator))
-        else:
-            self.caidas.add(id(ator))
-        banco.aplicar()
-
     # -- barras -> fracao inserida no combustivel ---------------------------
     def medir_insercoes(self) -> list:
         insercoes = []
@@ -1128,23 +1210,15 @@ class MonitorDoNucleo:
         nome = (obj.GetKeySym() or "").lower()
         if nome.startswith("kp_") and nome[3:].isdigit():
             codigo = nome[3:]
-        if codigo in ("1", "2", "3", "4"):
-            self.quadrante = int(codigo) - 1
-        elif codigo in ("j", "J"):
+        if codigo in ("j", "J"):
             self.nucleo.mudar_boro(-PASSO_DO_BORO)
         elif codigo in ("k", "K"):
             self.nucleo.mudar_boro(+PASSO_DO_BORO)
         elif codigo in ("x", "X"):
             self.indice_aceleracao = (self.indice_aceleracao + 1) % len(ACELERACOES)
-        elif codigo in ("d", "D"):
-            self.alternar_barra_caida()
         elif codigo in ("i", "I"):
             self.iniciar_reator(MODO_INICIAL)
             return
-        elif codigo == "," or nome == "comma":
-            self.nucleo.mudar_perna_fria(self.quadrante, -PASSO_DA_PERNA_FRIA)
-        elif codigo == "." or nome == "period":
-            self.nucleo.mudar_perna_fria(self.quadrante, +PASSO_DA_PERNA_FRIA)
         else:
             return
         self._atualizar_tela()
@@ -1262,13 +1336,13 @@ class MonitorDoNucleo:
         self.textos[2].SetInput(
             f"ÁGUA {PRESSAO_MPA:.1f} MPa (J/K boro)\n"
             f"Entrada  {r['T_entrada']:6.1f} °C\n"
-            f"Saída    {r['T_saida']:6.1f} °C\n"
+            f"Saída    {r['T_saida']:6.1f} vaso {r['T_saida_vaso']:5.1f}\n"
             f"Média    {r['T_media']:6.1f} °C\n"
             f"Densid.  {r['densidade']:6.1f} kg/m³\n"
             f"Margem sat. {r['margem_saturacao']:5.1f} °C"
         )
         self.textos[3].SetInput(
-            f"COMBUSTÍVEL\n"
+            f"COMBUSTÍVEL" + ("  (ebul. local)" if r["ebulicao_nucleada"] else "") + "\n"
             f"Pastilha méd. {r['T_pastilha']:6.0f} °C\n"
             f"Centro máx.   {r['T_centro_max']:6.0f} °C\n"
             f"Revest. máx.  {r['T_revest_max']:6.0f} °C\n"
@@ -1278,21 +1352,14 @@ class MonitorDoNucleo:
 
         # -- quadrantes --------------------------------------------------------
         quadrantes = self.nucleo.quadrantes()
-        self.titulo_mapa.SetInput(
-            f"QUADRANTES  QPTR {r['qptr']:.3f}\n1-4 escolhe  D barra  , . laço")
-        caida_em = set()
-        for q, escolha in enumerate(self.barra_do_quadrante):
-            if escolha and id(escolha[1]) in self.caidas:
-                caida_em.add(q)
+        self.titulo_mapa.SetInput(f"QUADRANTES  QPTR {r['qptr']:.3f}")
         for q, dados in enumerate(quadrantes):
             cor = _clarear(_cor(dados["T_pastilha"]))
-            selecionado = q == self.quadrante
-            self.celulas[q].pintar(cor, (0.15, 0.15, 0.2) if selecionado else (0.6, 0.6, 0.62))
-            self.celulas[q].ator_contorno.GetProperty().SetLineWidth(3.0 if selecionado else 1.0)
-            marca = " BARRA" if q in caida_em else ""
+            self.celulas[q].pintar(cor, (0.6, 0.6, 0.62))
+            self.celulas[q].ator_contorno.GetProperty().SetLineWidth(1.0)
             desvio = dados["T_fria"] - T_ENTRADA
             self.textos_celula[q].SetInput(
-                f"Q{q + 1}{marca}\n"
+                f"Q{q + 1}\n"
                 f"{dados['potencia'] * 100:6.1f} %\n"
                 f"Tq {dados['T_quente']:6.1f}\n"
                 f"Tf {dados['T_fria']:6.1f}" + (f"{desvio:+.0f}" if abs(desvio) >= 0.5 else "") + "\n"
@@ -1306,16 +1373,15 @@ class MonitorDoNucleo:
             alarmes.append("TRIP" + (f": {self.motivo_do_trip}" if self.motivo_do_trip else ""))
         if r["T_centro_max"] >= T_FUSAO_UO2:
             alarmes.append("FUSÃO DO UO2")
+        # Ebulicao sub-resfriada local no revestimento mais quente e normal em
+        # PWR a plena potencia: aparece so como nota no bloco do combustivel.
+        # Alarme mesmo e o canal todo chegar a saturacao (titulo > 0).
         if r["titulo_max"] > 0.0:
             alarmes.append("EBULIÇÃO NO CANAL")
-        elif r["ebulicao_nucleada"]:
-            alarmes.append("ebulição nucleada")
         if 0.0 < r["periodo"] < 10.0:
             alarmes.append("PERÍODO CURTO")
         if r["qptr"] > LIMITE_QPTR and r["potencia"] > 0.05:
             alarmes.append(f"QPTR {r['qptr']:.3f}")
-        if caida_em:
-            alarmes.append("BARRA CAÍDA " + " ".join(f"Q{q + 1}" for q in sorted(caida_em)))
         self.alarme.SetInput("  ".join(alarmes))
 
         for j, ator in enumerate(self.combustivel):
@@ -1335,23 +1401,30 @@ def _grade_do_modelo() -> list:
 
 def _teste() -> None:
     posicoes = _grade_do_modelo()
-    aneis = {"SA": [(1, 2)], "SB": [(0, 2)], "CA": [(1, 1)], "CB": [(0, 0), (0, 1)]}
+    # Mesma divisao do visualizador.py (BANCOS).
+    aneis = {"L": [(1, 2), (0, 0)], "D1": [(0, 2)], "D2": [(1, 1)], "D3": [(0, 1)]}
 
     def banco(p):
         anel = tuple(sorted((abs(p[0]), abs(p[1]))))
         return next(s for s, a in aneis.items() if anel in a)
 
     bancos = [banco(p) for p in posicoes]
-    nucleo = NucleoPWR(posicoes, [1.0] * len(posicoes))
+    t0 = time.perf_counter()
+    pesos = calibrar_pesos(posicoes, bancos)
+    print(f"Pesos das barras ({(time.perf_counter() - t0):.1f} s): "
+          + ", ".join(f"{s} {pesos[bancos.index(s)]:.3f}" for s in aneis))
+    nucleo = NucleoPWR(posicoes, [1.0] * len(posicoes), pesos=pesos)
 
     print("Valor de cada banco sozinho, a partir de tudo fora (pcm):")
+    fora = NucleoPWR(posicoes, [0.0] * len(posicoes), pesos=pesos).rho_total
     for sigla in aneis:
-        fora = NucleoPWR(posicoes, [0.0] * len(posicoes)).rho_total
-        so_este = NucleoPWR(posicoes, [1.0 if b == sigla else 0.0 for b in bancos]).rho_total
+        so_este = NucleoPWR(posicoes, [1.0 if b == sigla else 0.0 for b in bancos],
+                            pesos=pesos).rho_total
         print(f"   {sigla}: {so_este - fora:8.0f}")
+    print(f"   todas: {nucleo.rho_total - fora:8.0f}")
 
     posicao = {s: 1.0 for s in aneis}
-    velocidade = {"SA": 64, "SB": 64, "CA": 48, "CB": 48}   # passos por minuto
+    velocidade = {"L": 64, "D1": 48, "D2": 48, "D3": 48}   # passos por minuto
 
     def linha(rotulo):
         r = nucleo.resumo()
@@ -1364,7 +1437,7 @@ def _teste() -> None:
         return [posicao[b] for b in bancos]
 
     linha("barras no fundo")
-    for sigla in ("SA", "SB", "CA", "CB"):
+    for sigla in ("L", "D1", "D2", "D3"):
         while posicao[sigla] > 0.0:
             posicao[sigla] = max(0.0, posicao[sigla] - velocidade[sigla] / 60.0 / 231.0)
             nucleo.definir_insercoes(insercoes())
@@ -1373,8 +1446,8 @@ def _teste() -> None:
     nucleo.avancar(600.0)
     linha("+10 min")
 
-    print("\nBarra do CA caida no quadrante Q1:")
-    q1 = next(j for j, p in enumerate(posicoes) if banco(p) == "CA" and p[0] > 0 and p[1] < 0)
+    print("\nBarra do L caida no quadrante Q1:")
+    q1 = next(j for j, p in enumerate(posicoes) if banco(p) == "L" and p[0] > 0 and p[1] < 0)
     caida = insercoes()
     caida[q1] = 1.0
     nucleo.definir_insercoes(caida)
