@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Visualizador 3D para modelos .glb (glTF binario).
+Core3D - visualizador 3D do nucleo de um PWR (modelo .glb, glTF binario).
+
+A janela se chama "Core3D" e usa o icone core3d.ico (Windows, inclusive na
+barra de tarefas) ou core3d.png (Linux), que precisam estar na mesma pasta
+deste arquivo (sem eles o programa abre normalmente, so sem icone).
 
 O modelo aparece no lado direito da janela, sobre fundo branco, e pode ser
 girado livremente com o botao esquerdo do mouse, com zoom na roda.
@@ -38,6 +42,8 @@ from nucleo import MonitorDoNucleo
 # Configuracoes gerais
 # ----------------------------------------------------------------------------
 ARQUIVO_PADRAO = "Yotuber_Nuclear_Reacts_To_Demon_Core.glb"
+NOME_DO_PROGRAMA = "Core3D"
+ARQUIVO_DO_ICONE = "core3d.png"      # na mesma pasta do script
 
 LARGURA, ALTURA = 1100, 680          # tamanho inicial da janela
 COR_FUNDO = (1.0, 1.0, 1.0)          # branco
@@ -52,27 +58,35 @@ ZOOM = 1.1                           # >1 aproxima, <1 afasta
 MOSTRAR_INSTRUCOES = False           # texto de ajuda (o painel ocupa esse espaco)
 
 # ----------------------------------------------------------------------------
-# Barras de controle, no esquema de um PWR Westinghouse
+# Barras de controle, no esquema KWU (Siemens) de Angra 2
 #
-# As barras (RCCAs) sao divididas em BANCOS. Cada banco tem barras espalhadas
-# de forma simetrica pelos quatro quadrantes do nucleo, para que mover um banco
-# absorva neutrons por igual em todo o reator (quem mede o equilibrio entre
-# quadrantes, o QPTR, sao os detectores de fora do vaso).
+# Angra 2 tem 61 barras "pretas" (Ag-In-Cd), divididas em dois tipos de banco:
+#   L  - banco L: quase todas as barras. Em operacao fica fora (no maximo um
+#        pouco dentro, para acertar a distribuicao axial de potencia); e o que
+#        mantem o reator desligado. Todas as barras dele andam juntas.
+#   D  - grupos D, de 4 barras cada, que controlam a potencia (compensam o
+#        Doppler). Andam em serie, sem sobreposicao: um grupo so sai depois
+#        que o anterior saiu todo. Em potencia so o ultimo fica um pouco dentro.
+# A usina tem 4 grupos D; o painel tem 4 linhas, entao aqui ficam L + D1..D3
+# (as barras do quarto grupo D contam no banco L, ver nucleo.py).
+#
+# O modelo tem uma barra por coluna (21). Cada banco pega as barras de certos
+# "aneis" da grade. O anel e o par (menor, maior) da distancia ate o centro,
+# em passos da grade:
+#     (0,0) centro   (0,1) cruz interna   (1,1) diagonais
+#     (0,2) cruz externa   (1,2) as oito posicoes restantes da borda
+# Assim todo banco tem simetria de 90 graus (e de 1/8 do nucleo), e cada grupo
+# D tem 4 barras, como na usina.
 #
 # O painel funciona como a chave seletora na posicao de banco individual:
 # cada linha move um banco com o seu IN-HOLD-OUT. Segurou, anda; soltou, para.
 # ----------------------------------------------------------------------------
-# Cada banco pega as barras de certos "aneis" da grade. O anel e o par
-# (menor, maior) da distancia ate o centro, em passos da grade:
-#     (0,0) centro   (0,1) cruz interna   (1,1) diagonais
-#     (0,2) cruz externa   (1,2) as oito posicoes restantes da borda
-# Assim todo banco tem simetria de 90 graus (e de 1/8 do nucleo).
 BANCOS = [
     # linha, sigla, tipo,          aneis da grade
-    (1, "SA", "desligamento", [(1, 2)]),          # 8 barras
-    (2, "SB", "desligamento", [(0, 2)]),          # 4 barras
-    (3, "CA", "controle",     [(1, 1)]),          # 4 barras
-    (4, "CB", "controle",     [(0, 0), (0, 1)]),  # 5 barras (inclui a central)
+    (1, "L",  "desligamento", [(1, 2), (0, 0)]),  # 9 barras (borda + centro)
+    (2, "D1", "controle",     [(0, 2)]),          # 4 barras (cruz externa)
+    (3, "D2", "controle",     [(1, 1)]),          # 4 barras (diagonais)
+    (4, "D3", "controle",     [(0, 1)]),          # 4 barras (cruz interna); regula
 ]
 PREFIXO_DAS_BARRAS = "support"       # barras = Supports que passam da Top Platform
 NOME_TOPO_DO_REATOR = "top platform"
@@ -84,9 +98,12 @@ PASSOS_POR_MINUTO = {"desligamento": 64, "controle": 48}
 ACELERACAO_DO_TEMPO = 1.0            # 1 = tempo real; 5 = cinco vezes mais rapido
 COMECAR_INSERIDAS = True             # reator desligado: tudo no fundo
 
-# Procedimento de partida: os bancos de controle so saem depois que TODOS os de
-# desligamento estiverem totalmente retirados. Inserir e sempre permitido.
+# Procedimento (KWU): os grupos D so saem com o banco L quase todo fora (o L
+# pode ficar um pouco dentro, como no controle axial da usina), e um grupo D
+# so sai depois que o anterior saiu todo (em serie, sem sobreposicao).
+# Inserir e sempre permitido.
 EXIGIR_SEQUENCIA = True
+FRACAO_MINIMA_DO_L = 0.90            # fracao retirada do L para liberar os D
 
 # Trip (tecla T): as garras soltam e as barras caem por gravidade. Elas entram
 # no amortecedor (dashpot) perto do fundo e terminam a descida devagar.
@@ -349,13 +366,10 @@ def criar_fundo(janela: vtk.vtkRenderWindow) -> vtk.vtkRenderer:
             "S: ligar o slider de corte\n"
             "T: trip (barras caem)\n"
             "B: rearmar depois do trip\n"
-            "A: retirar SA e SB de uma vez (teste)\n"
+            "A: retirar o banco L de uma vez (teste)\n"
             "I: reiniciar o reator\n"
             "J / K: diluir / borar\n"
             "X: acelerar a física\n"
-            "1-4: escolher quadrante\n"
-            "D: derrubar/realinhar barra\n"
-            ", e .: perna fria do laço\n"
             "Q: sair"
         )
         propriedade = texto.GetTextProperty()
@@ -682,9 +696,10 @@ class ControleDeBarras:
     """Sistema de controle das barras: botoes, travas, trip, LEDs e contadores.
 
     - Segurar IN: o banco da linha desce passo a passo. OUT: sobe. Soltou, para.
-    - Bancos de desligamento andam a 64 passos/min; os de controle, a 48.
-    - Com EXIGIR_SEQUENCIA, os bancos de controle so saem com os de
-      desligamento todos retirados. Inserir nunca e bloqueado.
+    - O banco L anda a 64 passos/min; os grupos D, a 48.
+    - Com EXIGIR_SEQUENCIA, um grupo D so sai com o L acima de
+      FRACAO_MINIMA_DO_L e com os grupos D anteriores todos fora.
+      Inserir nunca e bloqueado.
     - Tecla T: trip. Todas as barras caem por gravidade e a retirada fica
       bloqueada ate rearmar os disjuntores com a tecla B.
     - LED verde: banco todo inserido. Vermelho: todo retirado.
@@ -725,7 +740,12 @@ class ControleDeBarras:
         if self.em_trip:
             return False
         if EXIGIR_SEQUENCIA and banco.tipo == "controle":
-            return all(b.retirada for b in self.bancos if b.tipo == "desligamento")
+            minimo = FRACAO_MINIMA_DO_L * PASSOS_TOTAIS
+            if any(b.passos < minimo for b in self.bancos if b.tipo == "desligamento"):
+                return False
+            # Grupos D em serie: os das linhas de cima tem que estar todos fora.
+            return all(b.retirada for b in self.bancos
+                       if b.tipo == "controle" and b.linha < banco.linha)
         return True
 
     # -- botoes --------------------------------------------------------------
@@ -772,11 +792,11 @@ class ControleDeBarras:
         self._iniciar()
 
     def retirar_desligamento(self) -> None:
-        """Atalho de teste: poe os bancos de desligamento todos fora, na hora.
+        """Atalho de teste: poe o banco L todo fora, na hora.
 
-        Na usina eles sobem passo a passo como os outros; aqui pulam direto
+        Na usina ele sobe passo a passo como os outros; aqui pula direto
         para PASSOS_TOTAIS para nao ter que segurar OUT por minutos. Com os
-        bancos de controle no fundo o reator continua subcritico.
+        grupos D no fundo o reator continua subcritico.
         """
         if self.em_trip:
             return
@@ -863,10 +883,108 @@ def _lado_vazio() -> str:
     return "direita" if LADO_DO_MODELO.lower().startswith("esq") else "esquerda"
 
 
+def _identificar_no_windows() -> None:
+    """No Windows, faz a barra de tarefas tratar o programa como "Core3D".
+
+    Sem isso o Windows agrupa a janela com o python.exe e mostra o icone do
+    Python na barra de tarefas, em vez do icone da janela.
+    """
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(NOME_DO_PROGRAMA)
+        except Exception:
+            pass
+
+
+def _carregar_icone():
+    """Le o core3d.png da pasta do script (None se nao achar)."""
+    caminho = os.path.join(os.path.dirname(os.path.abspath(__file__)), ARQUIVO_DO_ICONE)
+    if not os.path.isfile(caminho):
+        return None
+    leitor = vtk.vtkPNGReader()
+    leitor.SetFileName(caminho)
+    leitor.Update()
+    return leitor.GetOutput()
+
+
+ARQUIVO_DO_ICONE_WINDOWS = "core3d.ico"   # na mesma pasta do script
+
+
+def _hwnd_da_janela(janela: vtk.vtkRenderWindow) -> int:
+    """Handle (HWND) da janela no Windows, ou 0 se ainda nao existe."""
+    import ctypes
+    import re
+    ident = janela.GetGenericWindowId()
+    if isinstance(ident, int):
+        return ident
+    if isinstance(ident, str):
+        # O VTK devolve algo como "_000000000012a4b6_p_void".
+        achado = re.search(r"_([0-9a-fA-F]+)_p_", ident)
+        if achado:
+            return int(achado.group(1), 16)
+    return ctypes.windll.user32.FindWindowW(None, NOME_DO_PROGRAMA) or 0
+
+
+def _icone_na_barra_do_windows(janela: vtk.vtkRenderWindow) -> None:
+    """Troca o icone da janela e o da barra de tarefas pelo core3d.ico.
+
+    O SetIcon do VTK nao muda o icone no Windows, entao isso usa a API do
+    sistema: carrega o .ico em dois tamanhos (o pequeno vai na barra de
+    titulo, o grande na barra de tarefas e no Alt+Tab) e manda para a janela.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    caminho = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           ARQUIVO_DO_ICONE_WINDOWS)
+    hwnd = _hwnd_da_janela(janela)
+    if not hwnd or not os.path.isfile(caminho):
+        return
+
+    user32 = ctypes.windll.user32
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.LoadImageW.argtypes = (wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                  ctypes.c_int, ctypes.c_int, wintypes.UINT)
+    user32.SendMessageW.restype = ctypes.c_ssize_t
+    user32.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT,
+                                    ctypes.c_size_t, ctypes.c_ssize_t)
+    IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
+    WM_SETICON, ICON_SMALL, ICON_BIG = 0x0080, 0, 1
+    SM_CXICON, SM_CXSMICON = 11, 49
+
+    grande = user32.GetSystemMetrics(SM_CXICON) * 2      # nitido em telas com zoom
+    pequeno = user32.GetSystemMetrics(SM_CXSMICON) * 2
+    h_grande = user32.LoadImageW(None, caminho, IMAGE_ICON, grande, grande, LR_LOADFROMFILE)
+    h_pequeno = user32.LoadImageW(None, caminho, IMAGE_ICON, pequeno, pequeno, LR_LOADFROMFILE)
+    if h_grande:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_grande)
+    if h_pequeno:
+        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_pequeno)
+    # Guarda os handles: se forem liberados, o icone some.
+    janela._icones_windows = (h_grande, h_pequeno)
+
+
+def aplicar_icone(janela: vtk.vtkRenderWindow) -> None:
+    """Poe o icone na janela (chamado de novo depois que ela existe na tela)."""
+    if sys.platform.startswith("win"):
+        try:
+            _icone_na_barra_do_windows(janela)
+        except Exception as erro:
+            print(f"Aviso: nao consegui trocar o icone ({erro}).")
+        return
+    icone = getattr(janela, "_icone_core3d", None)
+    if icone is not None and hasattr(janela, "SetIcon"):
+        janela.SetIcon(icone)
+
+
 def montar(caminho: str, offscreen: bool = False):
+    _identificar_no_windows()
     janela = vtk.vtkRenderWindow()
     janela.SetSize(LARGURA, ALTURA)
-    janela.SetWindowName("Visualizador 3D - " + os.path.basename(caminho))
+    janela.SetWindowName(NOME_DO_PROGRAMA)      # so o nome, sem o caminho do modelo
+    janela._icone_core3d = _carregar_icone()
+    aplicar_icone(janela)
     janela.SetMultiSamples(8)  # antialiasing
     if offscreen:
         janela.SetOffScreenRendering(1)
@@ -892,19 +1010,22 @@ def main() -> None:
 
     # Cada linha do painel move um banco (IN insere, OUT retira).
     # T = trip (todas as barras caem); B = rearmar depois do trip.
-    # A = atalho de teste: retira SA e SB de uma vez.
+    # A = atalho de teste: retira o banco L de uma vez.
     barras = ControleDeBarras(menu.partes, painel, janela)
     barras.conectar(interator)
     estilo.barras = barras
 
     # Fisica do nucleo, so na regiao dos fuel rods (nucleo.py).
-    # J = diluir boro, K = borar, X = acelerar o tempo da fisica,
-    # 1-4 = quadrante, D = barra caida, , e . = perna fria do laco.
+    # J = diluir boro, K = borar, X = acelerar o tempo da fisica.
+    # Os quadrantes so sao mostrados (sem selecao nem comando por quadrante).
     nucleo = MonitorDoNucleo(menu.partes, barras, painel, janela, renderizador)
     nucleo.conectar(interator)
 
     interator.Initialize()
     janela.Render()
+    # Alguns sistemas so aceitam o icone com a janela ja aberta.
+    aplicar_icone(janela)
+    janela.SetWindowName(NOME_DO_PROGRAMA)
     interator.Start()
 
 
