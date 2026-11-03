@@ -14,11 +14,16 @@ Monta, no lado vazio da janela, quatro linhas espelhadas. Cada linha tem:
       Desligados, ficam cinza. Eles sempre apontam para os botoes.
     - botoes: os dois circulos. O da esquerda e o IN, o da direita e o OUT.
 
-Comportamento padrao: apertar IN acende (ou apaga) o LED verde daquela linha,
-apertar OUT faz o mesmo com o vermelho. Para plugar a logica de verdade, use o
-gancho `ao_apertar`:
+Os botoes funcionam no esquema "segurar": o painel avisa quando um botao e
+pressionado e quando ele e solto (ou quando o cursor sai de cima dele). Quem
+decide o que fazer com isso e quem usa o painel, pelos ganchos:
 
-    painel.ao_apertar = lambda linha, tipo, ligado: print(linha, tipo, ligado)
+    painel.ao_pressionar = lambda linha, tipo: print("segurou", linha, tipo)
+    painel.ao_soltar = lambda linha, tipo: print("soltou", linha, tipo)
+
+Os LEDs nao mudam sozinhos com o clique: quem acende e apaga e a logica de
+fora, com definir_leds() (o visualizador liga o verde com a barra toda
+inserida e o vermelho com a barra toda retirada).
 
 As pecas de desenho 2D vem do modulo do menu, para nao ter duas copias do mesmo
 codigo de vtkActor2D na pasta.
@@ -63,6 +68,7 @@ LADOS_DO_CIRCULO = 44                # segmentos do poligono que finge ser circu
 COR_DISPLAY = (0.85, 0.85, 0.85)
 COR_CONTORNO_DISPLAY = (0.62, 0.62, 0.64)
 COR_BOTAO = (0.89, 0.89, 0.90)
+COR_BOTAO_PRESSIONADO = (0.74, 0.74, 0.77)   # botao enquanto esta sendo segurado
 COR_CONTORNO_BOTAO = (0.74, 0.74, 0.76)
 COR_FURO = (0.98, 0.98, 0.98)
 COR_LED_APAGADO = (0.82, 0.82, 0.83)
@@ -166,6 +172,7 @@ class LinhaDeControle:
         self.numero = numero
         self.verde_ligado = False
         self.vermelho_ligado = False
+        self.pressionado = None           # None, "in" ou "out"
 
         self.display = Retangulo2D()
         self.display.pintar(COR_DISPLAY, COR_CONTORNO_DISPLAY)
@@ -283,6 +290,12 @@ class LinhaDeControle:
             COR_CONTORNO_LED,
         )
 
+    def atualizar_botoes(self) -> None:
+        """Botao segurado fica mais escuro, para dar retorno visual."""
+        for botao, tipo in ((self.botao_entrada, "in"), (self.botao_saida, "out")):
+            cor = COR_BOTAO_PRESSIONADO if self.pressionado == tipo else COR_BOTAO
+            botao.pintar(cor, COR_CONTORNO_BOTAO)
+
     def acertou(self, centro: tuple, x: float, y: float) -> bool:
         return math.hypot(x - centro[0], y - centro[1]) <= RAIO_BOTAO
 
@@ -298,7 +311,9 @@ class PainelDeControle:
         self.janela = janela
         self.lado = lado
         self.tamanho_desenhado = (0, 0)
-        self.ao_apertar = None            # gancho: (numero, "in"/"out", ligado)
+        self.ao_pressionar = None         # gancho: (numero, "in"/"out")
+        self.ao_soltar = None             # gancho: (numero, "in"/"out")
+        self.pressionado = None           # (linha, tipo) do botao segurado
 
         janela.SetNumberOfLayers(max(2, janela.GetNumberOfLayers()))
         self.renderizador = vtk.vtkRenderer()
@@ -365,6 +380,18 @@ class PainelDeControle:
         linha.atualizar_leds()
         self.janela.Render()
 
+    def definir_leds(self, numero: int, verde: bool, vermelho: bool,
+                     renderizar: bool = True) -> None:
+        """Define os dois LEDs de uma linha de uma vez (so redesenha se mudou)."""
+        linha = self.linhas[numero - 1]
+        if linha.verde_ligado == bool(verde) and linha.vermelho_ligado == bool(vermelho):
+            return
+        linha.verde_ligado = bool(verde)
+        linha.vermelho_ligado = bool(vermelho)
+        linha.atualizar_leds()
+        if renderizar:
+            self.janela.Render()
+
     def definir_texto_do_display(self, numero: int, texto: str) -> None:
         """Escreve algo no display daquela linha (vazio por padrao)."""
         self.linhas[numero - 1].texto_display.SetInput(texto)
@@ -374,27 +401,48 @@ class PainelDeControle:
         linha = self.linhas[numero - 1]
         return {"verde": linha.verde_ligado, "vermelho": linha.vermelho_ligado}
 
-    # -- cliques -------------------------------------------------------------
+    # -- cliques (segurar e soltar) -----------------------------------------
     def clique(self, x: float, y: float) -> bool:
-        """Trata um clique. Devolve True se algum botao foi apertado."""
+        """Trata o aperto do mouse. Devolve True se caiu em algum botao."""
         for linha in self.linhas:
             if linha.acertou(linha.centro_entrada, x, y):
-                return self._apertar(linha, "in")
+                return self._pressionar(linha, "in")
             if linha.acertou(linha.centro_saida, x, y):
-                return self._apertar(linha, "out")
+                return self._pressionar(linha, "out")
         return False
 
-    def _apertar(self, linha: LinhaDeControle, tipo: str) -> bool:
-        if tipo == "in":
-            linha.verde_ligado = not linha.verde_ligado
-            ligado = linha.verde_ligado
-        else:
-            linha.vermelho_ligado = not linha.vermelho_ligado
-            ligado = linha.vermelho_ligado
+    def pressionando(self) -> bool:
+        """True enquanto algum botao estiver sendo segurado."""
+        return self.pressionado is not None
 
-        linha.atualizar_leds()
+    def mover_mouse(self, x: float, y: float) -> None:
+        """Se o cursor sair de cima do botao segurado, conta como soltar."""
+        if self.pressionado is None:
+            return
+        linha, tipo = self.pressionado
+        centro = linha.centro_entrada if tipo == "in" else linha.centro_saida
+        if not linha.acertou(centro, x, y):
+            self.soltar()
+
+    def soltar(self) -> bool:
+        """Solta o botao segurado. Devolve True se havia algum."""
+        if self.pressionado is None:
+            return False
+        linha, tipo = self.pressionado
+        self.pressionado = None
+        linha.pressionado = None
+        linha.atualizar_botoes()
         self.janela.Render()
+        if callable(self.ao_soltar):
+            self.ao_soltar(linha.numero, tipo)
+        return True
 
-        if callable(self.ao_apertar):
-            self.ao_apertar(linha.numero, tipo, ligado)
+    def _pressionar(self, linha: LinhaDeControle, tipo: str) -> bool:
+        self.soltar()  # garante um botao so de cada vez
+        self.pressionado = (linha, tipo)
+        linha.pressionado = tipo
+        linha.atualizar_botoes()
+        self.janela.Render()
+        if callable(self.ao_pressionar):
+            self.ao_pressionar(linha.numero, tipo)
         return True
